@@ -1,3 +1,11 @@
+2004-05-19  Al Riddoch  <alriddoch@zepler.org>
+
+	* Clean up pointless use of a few macros in configure.ac. Trim
+	  version down to 3 numbers, rather than 4.
+
+	* Fix deps in rpm spec, and make sure to use the right compiler
+	  flags.
+
 2004-05-19  James Turner  <james@worldforge.org>
 
 	* Version number tweaks in anticipation of a release

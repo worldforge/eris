@@ -11,7 +11,7 @@ Copyright: GPL
 Group: System Environment/Libraries
 Source: %{name}-%{version}.tar.gz
 BuildRoot: %{_tmppath}/%{name}-%{version}-buildroot
-Requires: Atlas-C++ >= 0.4.93 wfmath >= 0.2.2 skstream > 0.3
+Requires: Atlas-C++ >= 0.4.93 wfmath >= 0.3.2 skstream > 0.3
 BuildRequires: Atlas-C++-devel >= 0.4.93 wfmath-devel >= 0.3.2 skstream-devel > 0.3 libstdc++-devel
 
 %description
@@ -44,7 +44,7 @@ to be integrated into glib in a glib or gtk+ based application.
 %setup
 
 %build
-%configure --enable-static
+CXXFLAGS=$RPM_OPT_FLAGS %configure --enable-static
 make
 
 %install
