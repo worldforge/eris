@@ -4,8 +4,7 @@ AC_PREREQ(2.5)
 AC_CONFIG_SRCDIR([Eris/Entity.cpp])
 
 # Detect the canonical host and target environment
-AC_CANONICAL_HOST
-AC_CANONICAL_TARGET
+AC_CANONICAL_SYSTEM
 
 # Information
 ERIS_MAJOR=1

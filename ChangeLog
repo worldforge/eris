@@ -1,12 +1,16 @@
+2004-05-18  Al Riddoch  <alriddoch@zepler.org>
+
+	* Tweak getting of canonical system.
+
 2004-05-15  James Turner  <james@worldforge.org>
 
-        * Eris/World.cpp, Eris/World.h, Eris/SignalDispatcher.h: Fix how 
+	* Eris/World.cpp, Eris/World.h, Eris/SignalDispatcher.h: Fix how 
           SIGHT(CREATE) is handled, so the value we emit via GotTime
           is correct. This entailed adding a SignalDispatcher3<> template.
 
 2004-05-13  James Turner  <james@worldforge.org>
 
-        * Eris/World.h, Eris/World.cpp: Add a GotTime signal, and emit it
+	* Eris/World.h, Eris/World.cpp: Add a GotTime signal, and emit it
           in response to sight(entity), sight(move) and sight(set). This
           entailed using SignalDispatcher2 in a few more places.
 
