@@ -1,3 +1,9 @@
+2004-05-13  James Turner  <james@worldforge.org>
+
+        * Eris/World.h, Eris/World.cpp: Add a GotTime signal, and emit it
+          in response to sight(entity), sight(move) and sight(set). This
+          entailed using SignalDispatcher2 in a few more places.
+
 2004-05-04  Al Riddoch  <alriddoch@zepler.org>
 
 	* Eris/TypeDispatcher.h, Eris/Dispatcher.cpp: Add new dispatcher

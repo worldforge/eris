@@ -2,7 +2,6 @@
 #define ERIS_WORLD_H
 
 #include <Eris/Types.h>
-#include <Atlas/Objects/ObjectsFwd.h>
 
 #include <sigc++/object.h>
 #include <sigc++/signal.h>
@@ -13,6 +12,29 @@
 #if defined(__GNUC__) && __GNUC__ < 3
 #	include <multimap.h>
 #endif
+
+namespace Atlas {
+	namespace Objects {
+		namespace Entity {
+			class RootEntity;
+			class GameEntity;
+		}
+		
+		namespace Operation {
+			class Move;
+			class Set;
+			class Sound;
+			class Talk;
+			class Look;
+			class Appearance;
+			class Disappearance;
+			class Info;
+			class Delete;
+			class Create;
+			class Sight;
+		}
+	}
+}
 
 namespace Eris {
 
@@ -124,6 +146,10 @@ public:
 	/// logout/disconnect/deletion of the Avatar
 	SigC::Signal0<void> Destroyed;
 	
+    /** emitted whenever time information is recieved from the server. Argument
+    is the curent world time in seconds. */
+    SigC::Signal1<void, double> GotTime;
+        
 protected:
 	friend class Entity;
 	friend class Avatar;
@@ -166,8 +192,10 @@ protected:
 	void recvSightCreate(const Atlas::Objects::Operation::Create &cr,
 		const Atlas::Objects::Entity::GameEntity &ent);
 	void recvSightDelete(const Atlas::Objects::Operation::Delete &del);
-	void recvSightSet(const Atlas::Objects::Operation::Set &set);
-	void recvSightMove(const Atlas::Objects::Operation::Move &mv);
+	void recvSightSet(const Atlas::Objects::Operation::Sight &sight,
+            const Atlas::Objects::Operation::Set &set);
+	void recvSightMove(const Atlas::Objects::Operation::Sight &sight, 
+            const Atlas::Objects::Operation::Move &mv);
 
 	// sound ops
 	void recvSoundTalk(const Atlas::Objects::Operation::Sound &snd,

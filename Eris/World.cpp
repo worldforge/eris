@@ -298,13 +298,15 @@ void  World::registerCallbacks()
 	);
 	
 	// sight of set operations
-	opclass->addSubdispatch( new SignalDispatcher<Atlas::Objects::Operation::Set>("set", 
+	opclass->addSubdispatch( new SignalDispatcher2<
+                Atlas::Objects::Operation::Sight, Atlas::Objects::Operation::Set>("set", 
 		SigC::slot(*this, &World::recvSightSet)),
 		"set"
 	);
 	
 	// sight of move operations
-	opclass->addSubdispatch( new SignalDispatcher<Atlas::Objects::Operation::Move>("move", 
+	opclass->addSubdispatch( new SignalDispatcher2<Atlas::Objects::Operation::Sight,
+                Atlas::Objects::Operation::Move>("move", 
 		SigC::slot(*this, &World::recvSightMove)),
 		"move"
 	);
@@ -404,6 +406,8 @@ void World::recvSightObject(const Atlas::Objects::Operation::Sight &sight,
 		// just pull it in
 		lookup(ci->asString());
 	}
+        
+    GotTime.emit(sight.getSeconds());
 }
 
 void World::recvSightCreate(const Atlas::Objects::Operation::Create &cr,
@@ -443,7 +447,8 @@ void World::recvSightDelete(const Atlas::Objects::Operation::Delete &del)
 	delete victim;
 }
 
-void World::recvSightMove(const Atlas::Objects::Operation::Move &mv)
+void World::recvSightMove(const Atlas::Objects::Operation::Sight &sight,
+    const Atlas::Objects::Operation::Move &mv)
 {
     if (!hasArg(mv, "id")) {
 	Eris::log(LOG_ERROR, "received SIGHT(MOVE) with no ID argument");
@@ -462,6 +467,8 @@ void World::recvSightMove(const Atlas::Objects::Operation::Move &mv)
 			throw UnknownEntity("Unknown entity at move", mv.getFrom());
 	} else
 		e->recvMove(mv);
+                
+    GotTime.emit(sight.getSeconds());
 }
 
 void World::recvSoundTalk(const Atlas::Objects::Operation::Sound &snd,
@@ -556,7 +563,8 @@ void World::recvDisappear(const Atlas::Objects::Operation::Disappearance &ds)
 	}
 }
 
-void World::recvSightSet(const Atlas::Objects::Operation::Set &set)
+void World::recvSightSet(const Atlas::Objects::Operation::Sight &sight,
+    const Atlas::Objects::Operation::Set &set)
 {
 	Eris::log(LOG_DEBUG, "processing IG sight(set)");
 	
@@ -568,6 +576,7 @@ void World::recvSightSet(const Atlas::Objects::Operation::Set &set)
 	}
 	
 	e->recvSet(set);
+    GotTime.emit(sight.getSeconds());
 }
 
 void World::recvErrorLook(const Atlas::Objects::Operation::Look &lk)
