@@ -8,7 +8,7 @@ namespace Eris
 
 class TypeDispatcher : public StdBranchDispatcher
 {
-public:	
+public:
 	TypeDispatcher(const std::string &nm, const std::string &ty) :
 		StdBranchDispatcher(nm), _type(ty) 
 	{;}
@@ -18,6 +18,18 @@ public:
 	virtual bool dispatch(DispatchContextDeque &dq);
 protected:
 	const std::string _type;
+};
+
+class ObjectDispatcher : public StdBranchDispatcher
+{
+public:
+	ObjectDispatcher(const std::string &nm) :
+		StdBranchDispatcher(nm)
+	{;}
+	
+	virtual ~ObjectDispatcher() {;}
+		
+	virtual bool dispatch(DispatchContextDeque &dq);
 };
 
 }

@@ -238,6 +238,17 @@ bool TypeDispatcher::dispatch(DispatchContextDeque &dq)
 	return StdBranchDispatcher::subdispatch(dq);
 }
 
+bool ObjectDispatcher::dispatch(DispatchContextDeque &dq)
+{
+	if (!hasMember(dq.front(), "objtype"))
+		return false;
+	
+	const std::string & otype = getMember(dq.front(), "objtype").asString();
+	if ((otype != "object") && (otype != "obj"))
+		return false;
+	return StdBranchDispatcher::subdispatch(dq);
+}
+
 bool OpFromDispatcher::dispatch(DispatchContextDeque &dq)
 {
 	if (getMember(dq.front(), "from").asString() != _id)

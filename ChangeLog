@@ -1,3 +1,11 @@
+2004-05-04  Al Riddoch  <alriddoch@zepler.org>
+
+	* Eris/TypeDispatcher.h, Eris/Dispatcher.cpp: Add new dispatcher
+	  that deals with objtype being "object" or "obj".
+
+	* Eris/Connection.cpp, Eris/Lobby.cpp, Eris/World.cpp: Use the
+	  new dispatcher so we can talk to Atlas-C++ 0.6.
+
 2004-04-19  Al Riddoch  <alriddoch@zepler.org>
 
 	* Eris/PollDefault.cpp: Ensure that flags don't get broken

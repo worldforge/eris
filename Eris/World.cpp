@@ -1,5 +1,5 @@
 #ifdef HAVE_CONFIG_H
-    #include "config.h"
+	#include "config.h"
 #endif
 
 #include <Eris/World.h>
@@ -9,10 +9,31 @@
 #include <Eris/Log.h>
 #include <Eris/Factory.h>
 #include <Eris/Utils.h>
+#include <Eris/Wait.h>
 #include <Eris/InvisibleEntityCache.h>
 #include <Eris/Player.h>
 #include <Eris/Avatar.h>
+
+#include <Eris/ClassDispatcher.h>
+#include <Eris/EncapDispatcher.h>
+#include <Eris/OpDispatcher.h>
+#include <Eris/TypeDispatcher.h>
+#include <Eris/IdDispatcher.h>
 #include <Eris/Exceptions.h>
+
+// various atlas headers we need
+#include <Atlas/Objects/Encoder.h>
+
+#include <Atlas/Objects/Entity/GameEntity.h>
+
+#include <Atlas/Objects/Operation/Create.h>
+#include <Atlas/Objects/Operation/Look.h>
+#include <Atlas/Objects/Operation/Delete.h>
+#include <Atlas/Objects/Operation/Talk.h>
+#include <Atlas/Objects/Operation/Appearance.h>
+#include <Atlas/Objects/Operation/Disappearance.h>
+#include <Atlas/Objects/Operation/Sound.h>
+#include <Atlas/Objects/Operation/Move.h>
 
 #include <sigc++/object_slot.h>
 
@@ -251,7 +272,7 @@ void  World::registerCallbacks()
 	Dispatcher *igclass = igd->addSubdispatch(ClassDispatcher::newAnonymous(_con));
 	Dispatcher *sightd = igclass->addSubdispatch(new EncapDispatcher("sight"), "sight");
 	
-	Dispatcher *ed = sightd->addSubdispatch(new TypeDispatcher("entity", "object"));
+	Dispatcher *ed = sightd->addSubdispatch(new ObjectDispatcher("entity"));
 	// sight of game-entities (rather important this!)
 	ed->addSubdispatch(new SignalDispatcher2<Atlas::Objects::Operation::Sight,
 		Atlas::Objects::Entity::GameEntity>("world", 
@@ -491,7 +512,32 @@ void World::recvInfoCharacter(const Atlas::Objects::Operation::Info &/*ifo*/,
 	look("");
 }
 
-
+void World::recvAppear(const Atlas::Objects::Operation::Appearance &ap)
+{
+	const AtlasListType &args = ap.getArgs();
+	for (AtlasListType::const_iterator A=args.begin();A!=args.end();++A) {
+		const AtlasMapType &app = A->asMap();
+		AtlasMapType::const_iterator V(app.find("id"));
+		std::string id(V->second.asString());
+		Entity *e = lookup(id);
+		if (!e) continue;
+	
+		// wunderbar, we have it already
+		e->setVisible(true);
+		Appearance.emit(e);
+		
+		float stamp(FLT_MAX);
+		// but it might be out of data - check the stamp [NULL indicates no stamping]
+		if ((V = app.find("stamp")) != app.end())
+			stamp = V->second.asFloat();
+		
+		if (stamp > e->getStamp()) {
+			Eris::log(LOG_DEBUG, "Issuing re-look for existing APPEARED entity %s with new stamp",
+				id.c_str());
+			look(id);
+		}
+	}
+}
 
 void World::recvDisappear(const Atlas::Objects::Operation::Disappearance &ds)
 {

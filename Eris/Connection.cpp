@@ -1,43 +1,105 @@
 #ifdef HAVE_CONFIG_H
-    #include "config.h"
+	#include "config.h"
 #endif
 
 #include <Eris/Connection.h>
 
+#include <Eris/atlas_utils.h>
+
+#include <Eris/Wait.h>
 #include <Eris/Timeout.h>
+#include <Eris/Utils.h>
 #include <Eris/TypeInfo.h>
 #include <Eris/Poll.h>
 #include <Eris/Log.h>
+
+#include <Eris/TypeDispatcher.h>
+#include <Eris/ClassDispatcher.h>
+#include <Eris/DebugDispatcher.h>
+#include <Eris/EncapDispatcher.h>
+
+#include <Eris/Lobby.h>
 #include <Eris/Exceptions.h>
-#include <Eris/router.h>
+
+#include <Atlas/Objects/Encoder.h>
+#include <Atlas/Objects/Operation/RootOperation.h>
 
 #include <skstream/skstream.h>
-#include <Atlas/Objects/Encoder.h>
-#include <Atlas/Objects/Operation.h>
+
 #include <sigc++/bind.h>
 #include <sigc++/object_slot.h>
 
 #include <cassert>
-#include <algorithm>
 
-using namespace Atlas::Objects::Operation;
-using Atlas::Objects::Root;
-using Atlas::Objects::smart_dynamic_cast;
+#include <stdarg.h>
+#include <stdio.h>
+#include <algorithm>
 
 namespace Eris {
 
-Connection::Connection(const std::string &cnm, bool dbg, Router* dr) :
-    BaseConnection(cnm, "game_", this),
-    m_typeService(new TypeService(this)),
-    m_defaultRouter(dr),
-    m_lock(0)
-{	
+DebugDispatcher *dd = NULL, *sdd = NULL;	
+	
+StringList tokenize(const std::string &s, char t);
+
+// declare the static member
+Connection* Connection::_theConnection = NULL;	
+
+typedef std::pair<std::string, long> SerialFrom;
+typedef std::set<SerialFrom> SerialFromSet;
+	
+////////////////////////////////////////////////////////////////////////////////////////////////////////	
+	
+Connection::Connection(const std::string &cnm, bool dbg) :
+	BaseConnection(cnm, "game_", this),
+	_statusLock(0),
+	_debug(dbg),
+	_typeService(new TypeService(this)),
+	_lobby(new Lobby(this))
+{
+	// setup the singleton instance variable
+	if (_theConnection == NULL)
+		_theConnection = this;
+	
+	// build the initial dispatch hierarchy
+	_rootDispatch = new StdBranchDispatcher("root");
+        _rootDispatch->addRef();
+		
+	Dispatcher *opd = new TypeDispatcher("op", "op");
+	_rootDispatch->addSubdispatch(opd);
+	opd = opd->addSubdispatch(ClassDispatcher::newAnonymous(this));
+	
+	Dispatcher *ifod = opd->addSubdispatch(new EncapDispatcher("info"), "info");
+	ifod->addSubdispatch(new ObjectDispatcher("entity")); 
+	ifod->addSubdispatch(new TypeDispatcher("op", "op"));
+    
+	Dispatcher *errd = opd->addSubdispatch(new StdBranchDispatcher("error"), "error");
+	errd->addSubdispatch(new EncapDispatcher("encap", 1));
+	
+	if (_debug) {
+		dd = new DebugDispatcher(_clientName + ".atlas-recvlog");
+		sdd = new DebugDispatcher(_clientName + ".atlas-sendlog");
+	}
+	
     Poll::instance().connect(SigC::slot(*this, &Connection::gotData));
 }
 	
 Connection::~Connection()
 {
-    delete m_typeService;
+    // clear the singleton instance pointer back to NULL
+    // (becuase dereferencing deleted memory costs lives!)
+    if( _theConnection == this)
+		_theConnection = NULL;
+	
+    delete _lobby;
+	_lobby = NULL;
+	
+    delete _typeService;
+	
+    _rootDispatch->decRef();
+    if (_debug) {
+      delete dd; dd = NULL;
+      delete sdd; sdd = NULL;
+    }
 }
 
 
@@ -52,170 +114,235 @@ void Connection::connect(const std::string &host, short port)
 
 void Connection::disconnect()
 {
-    assert(m_lock == 0);
+	assert(_statusLock == 0);
+	_statusLock = 0;
 	
-    // this is a soft disconnect; it will give people a chance to do tear down and so on
-    // in response, people who need to hold the disconnect will lock() the
-    // connection, and unlock when their work is done. A timeout stops
-    // locks from preventing disconnection
-    setStatus(DISCONNECTING);
-    Disconnecting.emit();
-
-    if (m_lock == 0) {
-        debug() << "no locks, doing immediate disconnection";
-        hardDisconnect(true);
-        return;
-    }
+	// this is a soft disconnect; it will give people a chance to do tear down and so on
+	// in response, people who need to hold the disconnect will lock() the
+	// connection, and unlock when their work is done. A timeout stops
+	// locks from preventing disconnection
+	setStatus(DISCONNECTING);
+	Disconnecting.emit();
     
-    // fell through, so someone has locked =>
-    // start a disconnect timeout
-    _timeout = new Eris::Timeout("disconnect_" + _host, this, 5000);
-    bindTimeout(*_timeout, DISCONNECTING);
+	if (!_statusLock) {
+		Eris::log(LOG_NOTICE, "no locks, doing immediate disconnection");
+		hardDisconnect(true);
+		return;
+	}
+	
+	// fell through, so someone has locked =>
+	// start a disconnect timeout
+	_timeout = new Eris::Timeout("disconnect_" + _host, this, 5000);
+	bindTimeout(*_timeout, DISCONNECTING);
 }
 
 void Connection::reconnect()
 {
-    if (_host.empty()) {
-        handleFailure("Previous connection attempt failed, ignorning reconnect()");
-    } else
-        BaseConnection::connect(_host, _port);
+	if (_host.empty()) {
+		Eris::log(LOG_ERROR, "Called Connection::reconnect() without prior sucessful connection");
+		handleFailure("Previous connection attempt failed, ignorning reconnect()");
+	} else
+		BaseConnection::connect(_host, _port);
 }
    
 void Connection::gotData(PollData &data)
 {
-    if (!_stream || !data.isReady(_stream))
-        return;
+    if(!_stream || !data.isReady(_stream))
+		return;
 	
-    if (_status == DISCONNECTED) {
-        error() << "Got data on a disconnected stream";
-	return;
-    }
-   
-    BaseConnection::recv();
-    
-// now dispatch recieved ops
-    while (!m_opDeque.empty()) {
-        dispatchOp(m_opDeque.front());
-        m_opDeque.pop_front();
-    }
+	else if (_status == DISCONNECTED)
+		Eris::log(LOG_ERROR, "Got data on a disconnected stream");
+	else
+		BaseConnection::recv();
 }		
 
 void Connection::send(const Atlas::Objects::Root &obj)
 {
-    if ((_status != CONNECTED) && (_status != DISCONNECTING))
-    {
-        error() << "called send on closed connection";
-        return;
-    }
+	if ((_status != CONNECTED) && (_status != DISCONNECTING))
+		throw InvalidOperation("Connection is not open");
 	
-    _encode->streamObjectsMessage(obj);
-    (*_stream) << std::flush;
+	_encode->streamMessage(&obj);
+	(*_stream) << std::flush;
+	
+	if (_debug) {
+		DispatchContextDeque dq(1, obj.asObject());
+		sdd->dispatch(dq);
+	}
 }
 
-void Connection::registerRouterForTo(Router* router, const std::string toId)
+void Connection::send(const Atlas::Message::Element &msg)
 {
-    m_toRouters[toId] = router;
+	if (_status != CONNECTED)
+		throw InvalidOperation("Connection is not open");
+	
+	_msgEncode->streamMessage(msg);
+	(*_stream) << std::flush;
+	
+	if (_debug) {
+		DispatchContextDeque dq(1, msg);
+		sdd->dispatch(dq);
+	}
 }
 
-void Connection::unregisterRouterForTo(Router* router, const std::string toId)
+Dispatcher* Connection::getDispatcherByPath(const std::string &path) const
 {
-    assert(m_toRouters[toId] == router);
-    m_toRouters.erase(toId);
-}
-        
-void Connection::registerRouterForFrom(Router* router, const std::string fromId)
-{
-    m_fromRouters[fromId] = router;
+	if (path.empty() || (":" == path))
+		return _rootDispatch;
+	
+	StringList tokens = tokenize(path, ':');
+	Dispatcher *d = _rootDispatch;
+	
+	while (!tokens.empty()) {
+		d = d->getSubdispatch(tokens.front());
+		if (!d)
+			return NULL;
+		tokens.pop_front();
+	}
+	
+	return d;
 }
 
-void Connection::unregisterRouterForFrom(Router* router, const std::string fromId)
+/** Remove a node from the dispatcher tree. Throws InvalidOperation if path is
+invalid, or the the node is not found. */
+void Connection::removeDispatcherByPath(const std::string &stem, const std::string &n)
 {
-    assert(m_fromRouters[fromId] == router);
-    m_fromRouters.erase(fromId);
+	Dispatcher *d = getDispatcherByPath(stem);
+	if (!d)
+		throw InvalidOperation("Unknown dispatcher in path " + stem);
+	
+	Dispatcher *rm = d->getSubdispatch(n);
+	if (!rm)
+		throw InvalidOperation("Unknown dispatcher " + n + " at " + stem);
+	
+	d->rmvSubdispatch(rm);
 }
-        
-void Connection::setDefaultRouter(Router* router)
+
+void Connection::removeIfDispatcherByPath(const std::string &stem, const std::string &n)
 {
-    if (m_defaultRouter || !router)
-    {
-        error() << "setDefaultRoute duplicate set or null argument";
-        return;
-    }
-    
-    m_defaultRouter = router;
+	Dispatcher *d = getDispatcherByPath(stem);
+	if (!d) {
+		// this used to throw, but this allows very robust clean-ups (silently, hmm)
+		return;
+	}
+	
+	Dispatcher *rm = d->getSubdispatch(n);
+	if (rm)
+	    d->rmvSubdispatch(rm);
 }
-    
+
 void Connection::lock()
 {
-    ++m_lock;
+	_statusLock++;
 }
 
 void Connection::unlock()
 {
-    if (m_lock < 1)
-        throw InvalidOperation("Imbalanced lock/unlock calls on Connection");
+	if (_statusLock < 1)
+		throw InvalidOperation("Imbalanced lock/unlock calls on Connection");
+	--_statusLock;
 	
-    if (--m_lock == 0)
-    {
-        switch (_status)
-        {
-        case DISCONNECTING:	
-            debug() << "Connection unlocked in DISCONNECTING, closing socket";
-            hardDisconnect(true);
-            break;
+	if (!_statusLock) 
+		switch (_status) {
+		case DISCONNECTING:	
+			Eris::log(LOG_NOTICE, "Connection unlocked in DISCONNECTING, closing socket");
+			hardDisconnect(true);
+			break;
 
-        default:
-            warning() << "Connection unlocked in spurious state : this may case a failure later";
-        }
-    }
+		default:
+			Eris::log(LOG_WARNING, "Connection unlocked in spurious state : this may case a failure later");
+		}
 }
 
-#pragma mark -
-
-void Connection::objectArrived(const Root& obj)
+Connection* Connection::getPrimary()
 {
-    RootOperation op = smart_dynamic_cast<RootOperation>(obj);
-    m_opDeque.push_back(op);
+	if (_theConnection == NULL)
+		throw InvalidOperation("No Connection instance exists");
+
+	return _theConnection;
 }
 
-void Connection::dispatchOp(const RootOperation& op)
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// protected / private gunk
+
+void Connection::objectArrived(const Atlas::Message::Element& obj)
 {
-    Router::RouterResult rr;
-    bool anonymous = op->getTo().empty();
+	Eris::log(LOG_VERBOSE, "-");
+	postForDispatch(obj);
     
-// give the type service a go   
-    /// @todo - wrap this in an anonymous=true guard?
-    rr = m_typeService->handleOperation(op);
-    if (rr == Router::HANDLED)
-        return;
-    
-// locate a router based on from
-    IdRouterMap::const_iterator R = m_fromRouters.find(op->getFrom());
-    if (R != m_fromRouters.end())
-    {
-        rr = R->second->handleOperation(op);
-        if (rr == Router::HANDLED)
-            return;
-    }
-    
-// locate a router based on the op's TO value
-    R = m_toRouters.find(op->getTo());
-    if (R != m_toRouters.end())
-    {
-        rr = R->second->handleOperation(op);
-        if (rr == Router::HANDLED)
-            return;
-        else
-            debug() << "TO router " << R->first << "didn't handle op";
-    } else if (!anonymous)
-        warning() << "recived op with TO=" << op->getTo() << ", but no router is registered for that id";
-            
-// go to the default router
-    rr = m_defaultRouter->handleOperation(op);
-    if (rr != Router::HANDLED)
-        warning() << "no-one handled op";
+	if (_debug) {
+		Atlas::Objects::Operation::RootOperation op = 
+			Atlas::atlas_cast<Atlas::Objects::Operation::RootOperation>(obj);
+		validateSerial(op);
+	}
+	
+	while (!_repostQueue.empty()) {
+		DispatchContextDeque dq(1, _repostQueue.front());
+		_repostQueue.pop_front();
+		
+		if (_debug)
+			dd->dispatch(dq);
+		
+		// manual check becuase objectSummary is a minor hit
+		if (getLogLevel() >= LOG_VERBOSE) {
+		    std::string summary(objectSummary( Atlas::atlas_cast<Atlas::Objects::Root>(dq.front())));
+		    Eris::log(LOG_VERBOSE, "Dispatching %s", summary.c_str());
+		}
+		
+		Dispatcher::enter();
+		
+		try {
+		    
+			// this invokes all manner of smoke and mirrors....
+			_rootDispatch->dispatch(dq);
+			
+			if (_debug) {
+				const Atlas::Message::Element::MapType &m(dq.back().asMap());
+				if (m.find("__DISPATCHED__") == m.end()) {
+					std::string summary(objectSummary( Atlas::atlas_cast<Atlas::Objects::Root>(dq.front())));
+					Eris::log(LOG_WARNING, "op %s never hit a leaf node", summary.c_str());	
+				}
+			}
+		} 
+	
+		catch (OperationBlocked &block) {
+			std::string summary(objectSummary( Atlas::atlas_cast<Atlas::Objects::Root>(dq.front())));
+			Eris::log(LOG_VERBOSE, "Caugh OperationBlocked exception dispatching %s", summary.c_str());
+			new WaitForSignal(block._continue, dq.back(), this);
+		}
+	
+		// catch actual failures, becuase they're bad.
+		catch (BaseException &be) {
+			Eris::log(LOG_ERROR, "Dispatch: caught exception: %s", be._msg.c_str());
+		}
+		
+		Dispatcher::exit();
+	}
+	
+	clearSignalledWaits();
 }
 
+void Connection::addWait(WaitForBase *w)
+{
+	assert(w);
+	_waitList.push_front(w);
+}
+
+void Connection::clearSignalledWaits()
+{
+	int ccount = _waitList.size();
+	
+	for (WaitForList::iterator W = _waitList.begin(); W != _waitList.end(); ) {
+	    if ((*W)->isPending()) {
+		    delete *W;
+		    W = _waitList.erase(W);
+	    } else
+		++W;
+	}
+	
+	ccount -= _waitList.size();
+	if (ccount)
+		Eris::log(LOG_VERBOSE, "Cleared %i signalled waitFors", ccount);
+}
 
 void Connection::setStatus(Status ns)
 {
@@ -236,36 +363,64 @@ void Connection::handleFailure(const std::string &msg)
 	}
 	
 	// FIXME - reset I think, but ensure this is safe
-        m_lock= 0;
+	_statusLock = 0;
 }
 
 void Connection::bindTimeout(Eris::Timeout &t, Status sc)
 {
-    // wire up all the stuff
-    t.Expired.connect( SigC::bind(Timeout.slot(),sc) );
+	// wire up all the stuff
+	t.Expired.connect( SigC::bind(Timeout.slot(),sc) );
 }
 
 void Connection::onConnect()
 {
-    BaseConnection::onConnect();
-    m_typeService->init();
+	BaseConnection::onConnect();
+	_typeService->init();
 }
 
-void Connection::postForDispatch(const Root& obj)
+void Connection::postForDispatch(const Atlas::Message::Element &msg)
 {
-    RootOperation op = smart_dynamic_cast<RootOperation>(obj);
-    m_opDeque.push_back(op);
+	_repostQueue.push_back(msg);
 }
 
-#pragma mark -
-
-long getNewSerialno()
+void Connection::validateSerial(const Atlas::Objects::Operation::RootOperation &op)
 {
-	static long _nextSerial = 1001;
-	// note this will eventually loop (in theorey), but that's okay
-	// FIXME - using the same intial starting offset is problematic
-	// if the client dies, and quickly reconnects
-	return _nextSerial++;
+	static SerialFromSet seen;
+	SerialFrom sfm(op.getFrom(), op.getSerialno());
+	
+	// don't bother to validate if the serial-no is 0
+	if (sfm.second == 0) {
+		std::string summary(objectSummary(op));
+		Eris::log(LOG_WARNING, "recieved op [%s] from %s with no serial number set",
+			summary.c_str(), sfm.first.c_str());
+		return;
+	}
+	
+	SerialFromSet::iterator S = seen.find(sfm);
+	if (S != seen.end()) {
+		std::string summary(objectSummary(op));
+		Eris::log(LOG_ERROR, "duplicate process of op [%s] from %s with serial# %i",
+			summary.c_str(), sfm.first.c_str(), sfm.second);
+	} else
+		seen.insert(sfm);
+	
+}
+
+/** strtok for the next generation : uses STL strings and returns a list*/
+StringList tokenize(const std::string &s, char t)
+{
+	StringList ret;
+	
+	unsigned int pos = 0, back = pos;
+	while (pos < s.size()) {
+		pos = s.find(t, back);
+		
+		// addthe next part
+		ret.push_back(s.substr(back, pos - back));
+		back = pos + 1;
+	}
+	
+	return ret;
 }
 
 } // of namespace
