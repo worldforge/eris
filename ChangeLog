@@ -1,5 +1,9 @@
 2004-05-19  Al Riddoch  <alriddoch@zepler.org>
 
+	* Release 1.2.0, interface version 2.0.0
+
+2004-05-19  Al Riddoch  <alriddoch@zepler.org>
+
 	* Clean up pointless use of a few macros in configure.ac. Trim
 	  version down to 3 numbers, rather than 4.
 
