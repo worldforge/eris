@@ -101,9 +101,52 @@ public:
 	/** Invoked when the specified class is recieved. The first argument is
 	the parent, the second is the child. E.g for a Sight operation, declare
 	the slot as MySlot(Operation::Sight &op, Entity::GameEntity &ent); */
-	SigC::Signal2<void, const T&, const S&> Signal;
-protected:
-	
+	SigC::Signal2<void, const T&, const S&> Signal;	
+};
+
+template <class U, class T, class S >
+class SignalDispatcher3 :
+	public LeafDispatcher, 
+	virtual public SigC::Object
+{
+public:
+	SignalDispatcher3(const std::string &nm, 
+		const SigC::Slot3<void,const U&, const T&, const S&> &slot) :
+		LeafDispatcher(nm)
+	{ Signal.connect(slot); }
+
+	virtual ~SignalDispatcher3() {;}
+
+	/// virtual interface for invoking the dispatcher; causes the signal to emitted
+	virtual bool dispatch(DispatchContextDeque &dq)
+	{
+		DispatchContextDeque::iterator Q = dq.begin();
+		
+		S object;
+		Atlas::Message::Element::MapType::const_iterator I = Q->asMap().begin();
+		
+		for (; I != Q->asMap().end(); ++I)
+        		object.setAttr(I->first, I->second);
+		++Q;
+		T parent;
+		I = Q->asMap().begin();
+		for (; I != Q->asMap().end(); ++I)
+        		parent.setAttr(I->first, I->second);
+		
+                ++Q;
+		U grandparent;
+		I = Q->asMap().begin();
+		for (; I != Q->asMap().end(); ++I)
+        		grandparent.setAttr(I->first, I->second);
+                
+		Signal.emit(grandparent, parent, object);
+		return LeafDispatcher::dispatch(dq);
+	}
+
+	/** Invoked when the specified class is recieved. The first argument is
+	the parent, the second is the child. E.g for a Sight operation, declare
+	the slot as MySlot(Operation::Sight &op, Entity::GameEntity &ent); */
+	SigC::Signal3<void, const U&, const T&, const S&> Signal;	
 };
 
 /** The message dispatcher provides a non-decoded output of the selected message. This is most

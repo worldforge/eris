@@ -286,7 +286,8 @@ void  World::registerCallbacks()
 	// the CREATE which encapsulates the entity.
 	//Dispatcher *cr = od->addSubdispatch(new ClassDispatcher("create", "create"));
 	Dispatcher *cr = opclass->addSubdispatch(new EncapDispatcher("create"), "create");
-	cr->addSubdispatch( new SignalDispatcher2<Atlas::Objects::Operation::Create,
+	cr->addSubdispatch( new SignalDispatcher3<Atlas::Objects::Operation::Sight,
+                Atlas::Objects::Operation::Create,
 		Atlas::Objects::Entity::GameEntity>("world", 
 		SigC::slot(*this, &World::recvSightCreate)
 	));
@@ -410,11 +411,13 @@ void World::recvSightObject(const Atlas::Objects::Operation::Sight &sight,
     GotTime.emit(sight.getSeconds());
 }
 
-void World::recvSightCreate(const Atlas::Objects::Operation::Create &cr,
+void World::recvSightCreate(const Atlas::Objects::Operation::Sight& sight,
+        const Atlas::Objects::Operation::Create &cr,
 	const Atlas::Objects::Entity::GameEntity &ge)
 {	
 	Atlas::Objects::Operation::Sight st;
         st.setFrom(cr.getFrom());
+        st.setSeconds(sight.getSeconds());
 	_pendingInitialSight.insert(ge.getId());
     
 	recvSightObject(st, ge);

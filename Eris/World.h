@@ -189,8 +189,10 @@ protected:
 	void recvSightObject(const Atlas::Objects::Operation::Sight &sight,
 		const Atlas::Objects::Entity::GameEntity &ent);
 
-	void recvSightCreate(const Atlas::Objects::Operation::Create &cr,
+	void recvSightCreate(const Atlas::Objects::Operation::Sight& sight,
+                const Atlas::Objects::Operation::Create &cr,
 		const Atlas::Objects::Entity::GameEntity &ent);
+                
 	void recvSightDelete(const Atlas::Objects::Operation::Delete &del);
 	void recvSightSet(const Atlas::Objects::Operation::Sight &sight,
             const Atlas::Objects::Operation::Set &set);
