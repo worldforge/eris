@@ -1,3 +1,9 @@
+2004-04-19  Al Riddoch  <alriddoch@zepler.org>
+
+	* Eris/PollDefault.cpp: Ensure that flags don't get broken
+	  if exception gets thrown in PollDefault::poll by catching
+	  and rethrowing.
+
 2004-03-06  Al Riddoch  <alriddoch@zepler.org>
 
 	* Eris/Entity.cpp, Eris/Entity.h: Make getProperty() member function
