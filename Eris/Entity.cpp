@@ -1,392 +1,474 @@
 #ifdef HAVE_CONFIG_H
-    #include "config.h"
+	#include "config.h"
 #endif
 
 #include <Eris/Entity.h>
+#include <Eris/World.h>
 #include <Eris/Connection.h>
+#include <Eris/Utils.h>
+#include <Eris/Wait.h>
+#include <Eris/Property.h>
 #include <Eris/TypeInfo.h>
+#include <Eris/OpDispatcher.h>
+#include <Eris/IdDispatcher.h>
 #include <Eris/Log.h>
-#include <Eris/entityRouter.h>
-#include <Eris/view.h>
+#include <Eris/Exceptions.h>
+
+#include <Atlas/Objects/Entity/GameEntity.h>
+#include <Atlas/Objects/Operation/Move.h>
+#include <Atlas/Objects/Operation/Talk.h>
+#include <Atlas/Objects/Operation/Sight.h>
 
 #include <wfmath/atlasconv.h>
-#include <Atlas/Objects/Entity.h>
-#include <Atlas/Objects/BaseObject.h>
 
 #include <algorithm>
 #include <set> 
 #include <cmath>
+
 #include <cassert>
 
-using namespace Atlas::Objects::Operation;
-using Atlas::Objects::Root;
-using Atlas::Objects::Entity::GameEntity;
-using Atlas::Message::Element;
-using Atlas::Objects::smart_static_cast;
-using Atlas::Objects::smart_dynamic_cast;
+using namespace Atlas::Message;
 
 namespace Eris {
 
-Entity::Entity(const GameEntity& ge, TypeInfo* ty, View* vw) :
-    m_type(ty),
-    m_location(NULL),
-    m_id(ge->getId()),
-    m_stamp(-1.0),
-    m_visible(false),
-    m_updateLevel(0),
-    m_view(vw),
-    m_hasBBox(false)
+Entity::Entity(const Atlas::Objects::Entity::GameEntity &ge, World *world) :
+	_id(ge.getId()),
+	_stamp(-1.0),
+	_visible(true),
+	_container(NULL),
+	_position(ge.getPos()),
+	_velocity(ge.getVelocity()),
+	_orientation(1.0, 0., 0., 0.),
+	_inUpdate(false),
+	_hasBBox(false),
+	_world(world)
+{	
+	_parents = getParentsAsSet(ge);
+	recvSight(ge);	
+}
+
+Entity::Entity(const std::string &id, World *world) :
+	_id(id),
+	_stamp(-1.0),
+	_visible(true),
+	_container(NULL),
+	_position(0., 0., 0.),
+	_velocity(0., 0., 0.),
+	_orientation(1.0, 0., 0., 0.),
+	_inUpdate(false),
+	_world(world)
 {
-    m_router = new EntityRouter(this);
+	;
 }
 
 Entity::~Entity()
 {
-    setLocation(NULL);
-    delete m_router;
+	Connection *con = _world->getConnection();
+	
+	while (!_localDispatchers.empty()) {
+		con->removeDispatcherByPath("op:sight:op",_localDispatchers.front());
+		_localDispatchers.pop_front();
+	}
 }
 
-#pragma mark -
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-Element Entity::valueOfAttr(const std::string& attr) const
+void Entity::setContainer(Entity *cnt)
 {
-    AttrMap::const_iterator A = m_attrs.find(attr);
-    if (A == m_attrs.end())
-    {
-        error() << "did getAttr(" << attr << ") on entity " << m_id << " which has no such attr";
-        return Element();
-    } else
-        return A->second;
+	Recontainered.emit(_container, cnt);
+	_container = cnt;
 }
 
-bool Entity::hasAttr(const std::string& attr) const
+void Entity::addMember(Entity *e)
 {
-    return m_attrs.count(attr) > 0;
+    Eris::log(LOG_DEBUG, "adding entity '%s' as member of '%s'",
+	e->getName().c_str(), getName().c_str());
+    
+    assert(e != this);
+    
+    _members.push_back(e);
+    AddedMember.emit(e);
+    e->setContainer(this);
 }
 
-SigC::Connection Entity::observe(const std::string& attr, const AttrChangedSlot& slot)
+void Entity::rmvMember(Entity *e)
 {
-    // sometimes, I realize how great SigC++
-    return m_observers[attr].connect(slot);
+    if (!e)
+	throw InvalidOperation("passed NULL pointer to Entity::rmvMember");
+    EntityArray::iterator ei = std::find(_members.begin(), _members.end(), e);
+    if (ei == _members.end())
+	    throw InvalidOperation("Unknown member " + e->getName() + 
+		" to remove from " + getName());
+    _members.erase(ei);
+    RemovedMember.emit(e);
 }
 
-#pragma mark -
+Entity* Entity::getMember(unsigned int i)
+{
+	if (i >= _members.size())
+		throw InvalidOperation("Illegal member index");
+	return _members[i];
+}
 
-void Entity::sight(const GameEntity &ge)
+bool Entity::hasProperty(const std::string &p) const
+{
+    PropertyMap::const_iterator pi =
+	_properties.find(p);
+    return (pi != _properties.end());
+}
+
+const Atlas::Message::Element& Entity::getProperty(const std::string &p) const
+{
+    PropertyMap::const_iterator pi = _properties.find(p);
+    if (pi == _properties.end())
+	throw InvalidOperation("Unknown property " + p);
+
+    return pi->second->getValue();
+}
+
+void Entity::observeProperty(const std::string &nm, 
+    const SigC::Slot1<void, const Atlas::Message::Element&> slot)
+{
+    PropertyMap::iterator pi = _properties.find(nm);
+    if (pi == _properties.end())
+	throw InvalidOperation("Unknown property " + nm);
+    
+    pi->second->Set.connect(slot);
+}
+
+WFMath::Point<3> Entity::getPosition() const
+{
+	return _position;
+}
+
+WFMath::Vector<3> Entity::getVelocity() const
+{
+	return _velocity;
+}
+
+WFMath::AxisBox<3> Entity::getBBox() const
+{
+	return _bbox;
+}
+
+WFMath::Quaternion Entity::getOrientation() const
+{
+    return _orientation;
+}
+
+TypeInfo* Entity::getType() const
+{
+    assert(!_parents.empty());
+	TypeService *ts = _world->getConnection()->getTypeService();
+    return ts->getTypeByName(*_parents.begin());
+}
+
+void Entity::setVisible(bool vis)
+{
+	bool wasVisible = _visible;
+	_visible = vis;
+  
+	// recurse onz children
+	for (EntityArray::iterator E=_members.begin();E!=_members.end();++E)
+		(*E)->setVisible(vis);
+	
+	if (!wasVisible && _visible) {
+		//move back to actice
+		_world->markVisible(this);
+	}
+	
+	if (wasVisible && !_visible) {
+		// move to the cache ... keep around for 'a while'
+		_world->markInvisible(this);
+	}
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+void Entity::recvSight(const Atlas::Objects::Entity::GameEntity &ge)
 {    
-    setFromRoot(smart_static_cast<Root>(ge));
+    beginUpdate();
+    
+    Atlas::Message::Element::MapType amp = ge.asObject().asMap();
+    for (Atlas::Message::Element::MapType::iterator A = amp.begin(); A!=amp.end(); ++A) {
+	if (A->first == "id") continue;
+	setProperty(A->first, A->second);
+    }
+
+    endUpdate();
 }
 
-void Entity::setFromRoot(const Root& obj)
+void Entity::recvMove(const Atlas::Objects::Operation::Move &mv)
 {	
     beginUpdate();
     
-    for (Atlas::Objects::RootData::const_iterator A = obj->begin(); A != obj->end(); ++A)
-    {
-        if (A->first == "id") 
-        {
-            //assert(A->second.asString() == m_id);
-            continue; // never set ID
-        }
-        
-        // see if the value in the sight matches the exsiting value
-        AttrMap::iterator I = m_attrs.find(A->first);
-        if ((I != m_attrs.end()) && (I->second == A->second))
-            continue;
-
-        setAttr(A->first, A->second);
+    const Atlas::Message::Element::MapType &args = 
+	mv.getArgs().front().asMap();
+    for (Atlas::Message::Element::MapType::const_iterator A = args.begin(); 
+	    A != args.end(); ++A) {
+	setProperty(A->first, A->second);
     }
-    
-    endUpdate();
+
+    endUpdate();	// emit 'Changed' too
+    handleMove();
 }
 
-void Entity::talk(const Root& talkArgs)
+void Entity::recvSet(const Atlas::Objects::Operation::Set &st)
 {
-    if (!talkArgs->hasAttr("say"))
-    {
-        error() << "entity " << m_id << " got talk with no 'say' argument";
-        return;
-    }
-    
-    // just emit the signal
-    Say.emit(talkArgs->getAttr("say").asString());
-}
-
-void Entity::moved()
-{
-    Moved.emit(this);
-}
-
-#pragma mark -
-
-void Entity::setAttr(const std::string &attr, const Element &val)
-{
+    const Atlas::Message::Element::MapType &attrs = st.getArgs().front().asMap();
     beginUpdate();
-
-    if (!nativeAttrChanged(attr, val))
-    {
-        // add to map
-        m_attrs[attr] = val;
-
-        // fire observers
-        if (m_observers.count(attr))
-            m_observers[attr].emit(attr, val);
+    // blast through the map, setting each property
+    for (Atlas::Message::Element::MapType::const_iterator ai = attrs.begin(); ai != attrs.end(); ++ai) {
+	if (ai->first=="id") continue;	// important
+	setProperty(ai->first, ai->second);
     }
-
-    addToUpdate(attr);
     endUpdate();
-
 }
 
-bool Entity::nativeAttrChanged(const std::string& attr, const Element& v)
+void Entity::recvSound(const Atlas::Objects::Operation::Sound &/*snd*/)
 {
-    if (attr == "name")
-    {
-	m_name = v.asString();
-        return true;
-    }
-    else if (attr == "stamp")
-    {
-	m_stamp = v.asFloat();
-        return true;
-    }
-    else if (attr == "pos")
-    {
-	m_position.fromAtlas(v);
-        return true;
-    }
-    else if (attr == "velocity")
-    {
-	m_velocity.fromAtlas(v);
-        return true;
-    }
-    else if (attr == "orientation")
-    {
-	m_orientation.fromAtlas(v);
-        return true;
-    }
-    else if (attr == "description")
-    {
-	m_description = v.asString();
-        return true;
-    }
-    else if (attr == "bbox")
-    {
-	m_bbox.fromAtlas(v);
-        m_hasBBox = true;
-        return true;
-    }
-    else if (attr == "loc")
-    {
-	setLocationFromAtlas(v.asString());
-        return true;
-    }
-    else if (attr == "contains")
-    {
-	//setContentsFromAtlas();
-        return true;
-    }
-
-    return false; // not a native property
+	// FIXME - decide upon a clever way to handle these. 
 }
+
+void Entity::recvTalk(const Atlas::Objects::Operation::Talk &tk)
+{
+	const Atlas::Message::Element &obj = getArg(tk, 0);
+	Atlas::Message::Element::MapType::const_iterator m = obj.asMap().find("say");
+	if (m == obj.asMap().end())
+		throw IllegalObject(tk, "No sound object in arg 0");
+	
+	handleTalk(m->second.asString());
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+// default implementions of handle simple emit the corresponding signal
+
+void Entity::handleTalk(const std::string &msg)
+{
+	Say.emit(msg);
+}
+
+void Entity::handleMove()
+{
+	Moved.emit(_position);
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// FIXME
+// this really needs a global switch from strings to integer Atoms to be effective;
+// once that is done the if ( == "") tests can be replaced with a nice efficent switch
+
+void Entity::setProperty(const std::string &s, const Atlas::Message::Element &val)
+{
+    /* we allow mapping of attributes to different internal values; use this with
+    caution */
+    std::string mapped(s);
+	
+    if (s == "name")
+	_name = val.asString();
+    else if (s == "stamp")
+	_stamp = val.asFloat();
+    else if (s == "loc") {
+	std::string loc = val.asString();
+	setContainerById(loc);
+    } else if (s == "pos") {
+	WFMath::Point<3> pos;
+	pos.fromAtlas(val);
+	setPosition(pos);
+    } else if (s == "velocity")
+	_velocity.fromAtlas(val);
+    else if (s == "orientation")
+	_orientation.fromAtlas(val);
+    else if (s == "face") {
+	mapped = "orientation";
+	WFMath::Point<3> face(val); // Should this be Point<3> or Vector<3>?
+	// build the quaternion from rotation about z axis
+	_orientation.rotation(2, atan2(face[1], face[0]));	
+    } else if (s == "description")
+	_description = val.asString();
+    else if (s == "bbox") {
+	_bbox.fromAtlas(val);
+        _hasBBox = true;
+    } else if (s == "contains") {
+	setContents(val.asList());
+    }
+    
+    PropertyMap::iterator P=_properties.find(mapped);
+    if (P == _properties.end()) {
+	P = _properties.insert(P, 
+	    PropertyMap::value_type(mapped, new Property())
+	);
+    }
+    
+    P->second->setValue(val);
+    
+    if (_inUpdate) {
+	// add to modified set
+	_modified.insert(mapped);
+    } else {
+	// generate a Changed single with a temporary set
+	StringSet ms;
+	ms.insert(mapped);
+	Changed.emit(ms);
+    }
+}
+
 
 void Entity::beginUpdate()
 {
-    ++m_updateLevel;
-}
-
-void Entity::addToUpdate(const std::string& attr)
-{
-    assert(m_updateLevel > 0);
-    m_modifiedAttrs.insert(attr);
+    if (_inUpdate)
+	throw InvalidOperation("Entity::beingUpdate called inside of property update");
+    assert(_modified.empty());
+    _inUpdate = true;
 }
 
 void Entity::endUpdate()
 {
-    if (m_updateLevel < 1)
-    {
-        error() << "mismatched begin/end update pair on entity";
-        return;
-    }
-        
-    if (--m_updateLevel == 0) // unlocking updates
-    {
-        Changed.emit(this, m_modifiedAttrs);
-        
-        if (m_modifiedAttrs.count("pos") || 
-            m_modifiedAttrs.count("velocity") ||
-            m_modifiedAttrs.count("orientation"))
-        {
-           moved(); // call the hook method, and hence emit the signal
-        }
-        
-        m_modifiedAttrs.clear();
-    }
+    if (!_inUpdate)
+	throw InvalidOperation("Entity::endUpdate called outside of property update");
+    _inUpdate = false;
+    Changed.emit(_modified);
+    _modified.clear();
 }
 
-#pragma mark -
-
-void Entity::setLocationFromAtlas(const std::string& locId)
+void Entity::innerOpFromSlot(Dispatcher *s)
 {
-    if (m_location)
-        if (locId == m_location->getId()) return;
-    else
-        if (locId.empty()) return;
-    // definitley changing the location
-    
-    Entity* newLocation = NULL;
-    if (!locId.empty())
-    {
-        newLocation = m_view->getExistingEntity(locId);
-        if (!newLocation)
-        {
-            m_view->getEntityFromServer(locId);
-            // mark ourselves invisible for now, we assume when the location
-            // entity arrives, it will find us and bind us / appear us
-            setVisible(false);
-            return;
-        }
-    }
-    
-    setLocation(newLocation);
+	// build the unique dispathcer name
+	std::string efnm = "from." + _id;
+	
+	// check if the dispatcher already exists
+	Connection *con = _world->getConnection(); 
+	Dispatcher *ds = con->getDispatcherByPath("op:sight:op"),
+		*efd = ds->getSubdispatch(efnm);
+	
+	if (!efd) {
+		efd = new OpFromDispatcher(efnm, _id);
+		_localDispatchers.push_back(efnm);
+		ds->addSubdispatch(efd);
+	}
+	
+	// attach the operation dispatcher
+	efd->addSubdispatch(s);
 }
 
-void Entity::setLocation(Entity* newLocation)
+void Entity::innerOpToSlot(Dispatcher *s)
 {
-    if (newLocation == m_location) return;
-    
-    if (m_location && m_visible)
-        removeFromLocation();
-    
-// do the actual member updating
-    Entity* oldLocation = m_location;
-    m_location = newLocation;
-    LocationChanged.emit(this, oldLocation);
-    
-    if (m_location && m_visible)
-        addToLocation();
+	// build the unique dispathcer name
+	std::string etnm = "to." + _id;
+	
+	// check if the dispatcher already exists
+	Connection *con = _world->getConnection(); 
+	Dispatcher *ds = con->getDispatcherByPath("op:sight:op"),
+		*etd = ds->getSubdispatch(etnm);
+	
+	if (!etd) {
+		etd = new OpToDispatcher(etnm, _id);
+		_localDispatchers.push_back(etnm);
+		ds->addSubdispatch(etd);
+	}
+	
+	// attach the operation dispatcher
+	etd->addSubdispatch(s);
 }
 
-void Entity::addToLocation()
+void Entity::setPosition(const WFMath::Point<3>& pt)
 {
-    bool wasPending = m_location->m_pendingContents.erase(m_id);
-    if (wasPending)
-    {
-        m_location->addChild(this);
-    }
-    else if (m_location->hasChild(m_id))
-    {
-        // nothing to do, parent already knows about us. Probably
-        // becuase it got SET(contents=) before we got SET(location=)
-    } else {
-        // location doesn't know anything about us at all
-        m_location->addChild(this);
+    _position = pt;
+}
+
+void Entity::setContents(const Atlas::Message::Element::ListType &contents)
+{
+    for (Atlas::Message::Element::ListType::const_iterator
+	    C=contents.begin(); C!=contents.end();++C) {
+	// check we have it; if yes, ensure it's installed. if not, it will be attached when
+	// it arrives.
+	Entity *con = _world->lookup(C->asString());
+	if (con) {
+	    Eris::log(LOG_DEBUG, 
+		"already have entity '%s', not setting container",
+		con->getName().c_str()
+	    );
+	}
     }
 }
 
-void Entity::removeFromLocation()
+void Entity::setContainerById(const std::string &id)
 {
-    if (m_location->hasChild(m_id))
-    {
-        m_location->removeChild(this);
+    if ( !_container || (id != _container->getID()) ) {
+		
+	if (_container) {
+	    Eris::log(LOG_DEBUG, "Entity::setContainerById: setting container to NULL");
+	    _container->rmvMember(this);
+	    _container = NULL;
+	}
+		
+	// have to check this, becuase changes in what the client can see
+	// may cause the client's root to change
+	if (!id.empty()) {
+		Entity *ncr = _world->lookup(id);
+		if (ncr) {
+			ncr->addMember(this);
+			setContainer(ncr);
+		} else {
+			// setup a redispatch once we have the container
+			// sythesises a set, with just the container.
+			Atlas::Objects::Operation::Set setc;
+				
+			Atlas::Message::Element::MapType args;
+			args["loc"] = id;
+			setc.setArgs(Atlas::Message::Element::ListType(1,args));
+			setc.setTo(_id);
+			
+			Atlas::Objects::Operation::Sight ssc;
+			ssc.setArgs(Atlas::Message::Element::ListType(1, setc.asObject()));
+			ssc.setTo(_world->getFocusedEntityID());
+			ssc.setSerialno(getNewSerialno());
+			
+			// if we received sets/creates/sights in rapid sucession, this can happen, and is
+			// very, very bad
+			std::string setid("set_container_" + _id);
+			std::string dispatch_id = "op:" + _world->getDispatcherID()
+				+ ":sight:entity";
+
+			_world->getConnection()->removeIfDispatcherByPath(
+				dispatch_id, setid);
+			
+			new WaitForDispatch(ssc, dispatch_id, 
+				new IdDispatcher(setid, id), _world->getConnection());
+		}
+	} // of new container is valid
+    }	
+	
+    if (id.empty()) {	// id of "" implies local root
+	Eris::log(LOG_DEBUG, "got entity with empty container, assuming it's the world");
+	_world->setRootEntity(this);	
     }
-    else if (m_location->m_pendingContents.erase(m_id))
+}
+
+#ifdef HAVE_CPPUNIT
+class EntityTest : public TestCase
+{
+public:
+    
+    void runTest()
     {
-        // nipped it in the bud, no problem
-    } else {
-        error() << "location " << m_location->getId() <<
-            " denies all knowledge of child " << m_id;
+	Entity testA("foo");	
+	
+	Atlas::Objects::Operation::Move mv;
+	mv.SetLocation("foo");
+	Coord v1(2.0, 3.0, -4.0);
+	mv.SetVelocity(v1.asObject());
+	mv.setAttr("face", 120.0);
+	
+	testA.recvMove(mv);
+	
+	CPPUNIT_ASSERT("foo" == test.getContainer());
+	CPPUNIT_ASSERT(120.0 == test.getOrientation().asEuler().z);
     }
-}
 
-void Entity::setContentsFromAtlas(const StringList& contents)
-{
-    m_contents.clear();
-
-    for (StringList::const_iterator I=contents.begin(); I != contents.end(); ++I)
-    {
-        Entity* child = m_view->getExistingEntity(*I);
-        if (child)
-        {
-            addChild(child);
-        } else {   
-            m_view->getEntityFromServer(*I);
-            m_pendingContents.insert(*I);
-        }
-    } // of contents list iteration
-}
-
-bool Entity::hasChild(const std::string& eid) const
-{
-    for (EntityArray::iterator C=m_contents.end(); C != m_contents.end(); ++C)
-        if ((*C)->getId() == eid) return true;
-        
-    return false;
-}
-
-void Entity::addChild(Entity* e)
-{
-    m_contents.push_back(e);
-    ChildAdded.emit(this, e);
-    assert(e->getLocation() == this);
-}
-
-void Entity::removeChild(Entity* e)
-{
-    assert(e->getLocation() == this);
-    
-    for (EntityArray::iterator C=m_contents.end(); C != m_contents.end(); ++C)
-    {
-        if (*C == e)
-        {
-            m_contents.erase(C);
-            ChildRemoved.emit(this, e);
-            return;
-        }
-    }
-        
-   error() << "child " << e->getId() << " of entity " << m_id << " not found doing remove";
-}
-
-#pragma mark -
-
-void Entity::setVisible(bool vis)
-{
-    if (m_visible == vis) return;
-
-    if (m_location && m_visible)
-        removeFromLocation();
-
-    m_visible = vis;
-    updateCalculatedVisibility();
-    
-    if (m_location && m_visible)
-        addToLocation();
-}
-
-bool Entity::isVisible() const
-{
-    if (m_location)
-        return m_visible && m_location->isVisible();
-    else
-        return m_visible;
-}
-
-void Entity::updateCalculatedVisibility()
-{
-    bool wasVisible = m_view->isEntityVisible(this),
-        nowVisible = isVisible();
-        
-    if (wasVisible == nowVisible) return;
-    
-    // fires Appearance / Disappearance as necessary 
-    // (if we have a valid parent)
-    m_view->setEntityVisible(this, nowVisible);
-    
-    VisibilityChanged.emit(this, nowVisible);
-    
-    for (unsigned int C=0; C < m_contents.size(); ++C)
-        m_contents[C]->updateCalculatedVisibility();
-}
+private:
+};
+#endif
 
 } // of namespace 

@@ -1,4 +1,9 @@
-2004-02-04  Al Riddoch  <alriddoch@zepler.org>
+2004-03-06  Al Riddoch  <alriddoch@zepler.org>
+
+	* Eris/Entity.cpp, Eris/Entity.h: Make getProperty() member function
+	  const.
+
+2004-03-04  Al Riddoch  <alriddoch@zepler.org>
 
 	* Bump the interface version so runtime libs for transitional
 	  don't interfere with stable.
